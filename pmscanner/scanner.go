@@ -3,15 +3,15 @@ package pmscanner
 import (
     "errors"
     "fmt"
-    "os"
     "io"
+    "os"
+    "path/filepath"
     "strconv"
-    "encoding/hex"
+    "strings"
 
     "pmapp/pmhasher"
     "pmapp/pmkeyvdb"
 )
-
 
 type Scanner struct {
     bSize   int
@@ -43,17 +43,31 @@ func (this *Scanner) Close() {
     this.keyvdb.Close()
 }
 
-func (this *Scanner) Scan(filename string) error {
-    var err error
+const maxDepth int = 7
 
-    if this.keyvdb == nil {
-        return errors.New("db yet not open")
-    }
+func (this *Scanner) Scan(basedir string) error {
+    var err error
 
     err = this.keyvdb.Clean()
 	if err != nil {
 		return err
 	}
+
+    executor := func(filename string) {
+        fmt.Print(".")
+        this.scanFile(filename)
+    }
+    _ = this.FileTreeScanner(basedir, maxDepth, executor)
+    fmt.Println()
+    return err
+}
+
+func (this *Scanner) scanFile(filename string) error {
+    var err error
+
+    if this.keyvdb == nil {
+        return errors.New("db yet not open")
+    }
 
 	file, err := os.OpenFile(filename, os.O_RDONLY, 0)
 	if err != nil {
@@ -67,6 +81,12 @@ func (this *Scanner) Scan(filename string) error {
         if  err == io.EOF {
             break
         }
+        if  err != nil {
+            return err
+        }
+        //if read < this.bSize {
+        //    continue
+        //}
         hash, err := this.hasher.Hash(buffer[:read])
         if err != nil {
             return err
@@ -81,11 +101,13 @@ func (this *Scanner) Scan(filename string) error {
 
 func (this *Scanner) Print() error {
     var err error
+    dupSize := 0
+    dupCounter := 0
     executor := func(key []byte, val []byte) bool {
-        keyHex := hex.EncodeToString(key)
         counter, _ := strconv.Atoi(string(val))
         if counter > 1 {
-            fmt.Println(keyHex, counter)
+            dupSize += (counter - 1) * this.bSize
+            dupCounter += (counter - 1)
         }
         return false
     }
@@ -93,6 +115,20 @@ func (this *Scanner) Print() error {
     if err != nil {
         return err
     }
+
+    totalCounter := 0
+    executor = func(key []byte, val []byte) bool {
+        totalCounter++
+        return false
+    }
+    err = this.keyvdb.Iter(executor)
+    if err != nil {
+        return err
+    }
+    fmt.Println(totalCounter, dupCounter, (100 * float32(dupCounter))/float32(totalCounter))
+    //totalSize := totalCounter * this.bSize
+    //fmt.Println(totalSize, dupSize, (100 * float32(dupSize))/float32(totalSize))
+
     return err
 }
 
@@ -127,4 +163,48 @@ func (this *Scanner) Inc(key []byte) error {
     }
     return err
 }
+
+const pathSeparator string = "/"
+
+type FileExecutor = func(filePath string)
+
+func (this *Scanner) FileTreeScanner(basePath string, depth int, executor FileExecutor) error {
+
+    pathLength := func(path string) int {
+        if len(path) == 0 {
+            return 0
+        }
+        path = filepath.Clean(path)
+        path = filepath.ToSlash(path)
+        path = strings.Trim(path, pathSeparator)
+        if len(path) == 0 {
+            return 0
+        }
+        list := strings.Split(path, pathSeparator)
+        return len(list)
+    }
+
+    depth = depth + pathLength(basePath)
+
+    resolver := func(fullPath string, info os.FileInfo, err error) error {
+        if err != nil {
+            return err
+        }
+        if pathLength(fullPath) > depth  {
+            return filepath.SkipDir
+        }
+        if !info.IsDir(){
+            executor(fullPath)
+        }
+        return nil
+    }
+    err := filepath.Walk(basePath, resolver)
+    if err != nil {
+        return err
+    }
+    return err
+}
+
+
+
 //EOF
